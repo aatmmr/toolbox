@@ -35,6 +35,9 @@ repos = ["aatmmr/playground"]
 role = 'admin'
 ```
 
+> [!IMPORTANT]
+> The `role` is case sensitive if you use a custom role!
+
 1. Run the script:
 
 ```bash
