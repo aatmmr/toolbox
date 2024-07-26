@@ -1,0 +1,15 @@
+# dependabot.yml sample for GitHub Actions ad Node Packages
+# where the folder of the package.json for the scan is `/test` and not the root of the repo.
+
+version: 2
+updates:
+  # Maintain dependencies for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # Maintain dependencies for npm
+  - package-ecosystem: "npm"
+    directory: "/test"
+    schedule:
+      interval: "weekly"
