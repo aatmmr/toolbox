@@ -20,3 +20,5 @@ GitHub Advanced Security provides advanced security features for your repositori
 - [CodeQL Query Suits](https://docs.github.com/en/enterprise-cloud@latest/code-security/code-scanning/managing-your-code-scanning-configuration/codeql-query-suites) with [default list of queries for supported languages](https://docs.github.com/en/enterprise-cloud@latest/code-security/code-scanning/managing-your-code-scanning-configuration/codeql-query-suites#query-lists-for-the-default-query-suites)
 - [CodeQL Community Packs](https://github.com/GitHubSecurityLab/CodeQL-Community-Packs)
 - [Self-hosted Runner for CodeQL](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-code-security/managing-github-advanced-security-for-your-enterprise/configuring-code-scanning-for-your-appliance)
+  - [Systen Requirements](https://codeql.github.com/docs/codeql-overview/system-requirements/)
+  - Required runner label is `code-scanning`
