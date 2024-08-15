@@ -7,9 +7,10 @@ GitHub Advanced Security provides advanced security features for your repositori
 ### Dependabot
 
 - [Package Ecosystems](https://docs.github.com/en/enterprise-cloud@latest/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#package-ecosystem)
-- [Configuration Options](https://docs.github.com/en/enterprise-cloud@latest/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#package-ecosystem)
+- [Configuration Options](https://docs.github.com/en/enterprise-cloud@latest/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#configuration-options-for-the-dependabotyml-file)
 - [Private Registries](https://docs.github.com/en/enterprise-cloud@latest/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#configuration-options-for-private-registries)
   - [Dependabot Credentials](https://docs.github.com/en/enterprise-cloud@latest/code-security/dependabot/working-with-dependabot/configuring-access-to-private-registries-for-dependabot#storing-credentials-for-dependabot-to-use)
+  - [Integrate with Atrifactory](https://jfrog.com/help/r/artifactory-how-to-integrate-github-dependabot-with-jfrog-artifactory)
 
 ### Secret Scanning
 
