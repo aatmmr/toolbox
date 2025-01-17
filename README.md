@@ -10,3 +10,8 @@ Enjoy browsing 🏄
 
 - [GitHub Administration](https://github.com/aatmmr/toolbox/tree/main/administration)
 - [GitHub Advanced Security](https://github.com/aatmmr/toolbox/tree/main/ghas)
+- [GitHub Projects](https://github.com/aatmmr/toolbox/tree/main/gh-projects)
+
+## Stack
+
+The repository tries to collect stand-alone scripts that can be executed. The underlying base will be JavaScript and Node.js with Octokit to access GitHub.
