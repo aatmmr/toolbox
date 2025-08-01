@@ -13,6 +13,7 @@ for a given organization. This helps evaluating the size of repositories in an o
 
 - `GITHUB_TOKEN`: A GitHub Personal Access Token (PAT) with the required permissions (`repo`)
 - `GITHUB_ORGANIZATION`: The name of the organization to retrieve the repository data for
+- `GITHUB_URL`(_Optional_):  The URL of the GitHub API, e.g. a GitHub Enterprise Server URL
 
 ### Use the Script
 
