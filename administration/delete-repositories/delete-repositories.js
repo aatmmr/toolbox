@@ -1,12 +1,12 @@
 const { Octokit } = require("@octokit/core");
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 
 require("dotenv").config();
 
 const githubUrl = process.env.GITHUB_URL || "https://api.github.com";
 const githubToken = process.env.GITHUB_TOKEN;
-const dryRun = process.env.DRY_RUN === "true";
 
 const octokit = new Octokit({ auth: githubToken, baseUrl: githubUrl });
 
@@ -43,12 +43,29 @@ function getRepositoriesFromFile(filePath) {
 }
 
 /**
+ * Prompt the user with a yes/no question on the command line.
+ *
+ * @param {string} question - The question to display to the user.
+ * @returns {Promise<boolean>} A promise that resolves to true if the user confirmed with "y" or "yes".
+ */
+function askForConfirmation(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(/^y(es)?$/i.test(answer.trim()));
+    });
+  });
+}
+
+/**
  * Delete a single repository from GitHub.
  *
  * @param {string} owner - The owner of the repository.
  * @param {string} repo - The name of the repository.
+ * @param {boolean} dryRun - When true, logs the intended deletion without performing it.
  */
-async function deleteRepository(owner, repo) {
+async function deleteRepository(owner, repo, dryRun) {
   if (dryRun) {
     console.log(`[DRY RUN] Would delete repository: ${owner}/${repo}`);
     return;
@@ -62,7 +79,10 @@ async function deleteRepository(owner, repo) {
 }
 
 (async () => {
-  const filePath = process.argv[2] || path.join(__dirname, "repositories.txt");
+  const args = process.argv.slice(2);
+  const dryRun = process.env.DRY_RUN === "true" || args.includes("--dry-run");
+  const confirm = args.includes("--confirm");
+  const filePath = args.find((arg) => !arg.startsWith("--")) || path.join(__dirname, "repositories.txt");
 
   if (!githubToken) {
     console.error("Missing GITHUB_TOKEN environment variable");
@@ -82,7 +102,14 @@ async function deleteRepository(owner, repo) {
   }
 
   for (const { owner, repo } of repositories) {
-    await deleteRepository(owner, repo);
+    if (confirm) {
+      const proceed = await askForConfirmation(`Delete repository ${owner}/${repo}? (y/N) `);
+      if (!proceed) {
+        console.log(`Skipped repository: ${owner}/${repo}`);
+        continue;
+      }
+    }
+    await deleteRepository(owner, repo, dryRun);
   }
 
   console.log("Done");
