@@ -26,6 +26,9 @@ Temporary Items
 # Node.js dependencies
 node_modules/
 
+# Copilot usage metrics exports
+copilot-usage-metrics-exports/
+
 # Optional npm cache directory
 .npm
 

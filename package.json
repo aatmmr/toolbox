@@ -12,6 +12,9 @@
     "url": "https://github.com/aatmmr/toolbox/issues"
   },
   "homepage": "https://github.com/aatmmr/toolbox#readme",
+  "scripts": {
+    "test": "node --test statistics/get-copilot-usage-metrics/*.test.js"
+  },
   "dependencies": {
     "dotenv": "^16.4.7",
     "octokit": "^4.1.0"
