@@ -11,6 +11,7 @@ Enjoy browsing 🏄
 - [GitHub Administration](https://github.com/aatmmr/toolbox/tree/main/administration)
 - [GitHub Advanced Security](https://github.com/aatmmr/toolbox/tree/main/ghas)
 - [GitHub Projects](https://github.com/aatmmr/toolbox/tree/main/gh-projects)
+- [GitHub Copilot usage metrics exporter](statistics/get-copilot-usage-metrics)
 
 ## Stack
 
