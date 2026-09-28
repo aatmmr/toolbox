@@ -3,7 +3,6 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const readline = require('readline');
 const { once } = require('events');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
@@ -61,6 +60,7 @@ Options:
   --skip-usage-records      Do not fetch enterprise usage records
   --force                   Replace completed daily report artifacts
   --concurrency <number>    Concurrent report requests from 1 to 10 (default: 4)
+  --verbose                 Print detailed progress to stderr
   --help, -h                Show this help
 
 By default, the exporter fetches the past 28 days of daily history, the latest
@@ -74,6 +74,7 @@ function parseArgs(argv, now = new Date()) {
     skipUsageRecords: false,
     force: false,
     concurrency: 4,
+    verbose: false,
   };
   const valueOptions = new Set([
     '--enterprise',
@@ -102,6 +103,10 @@ function parseArgs(argv, now = new Date()) {
     }
     if (argument === '--force') {
       options.force = true;
+      continue;
+    }
+    if (argument === '--verbose') {
+      options.verbose = true;
       continue;
     }
     if (!valueOptions.has(argument)) {
@@ -202,6 +207,14 @@ function enumerateDays(from, to) {
   return days;
 }
 
+function createLogger(enabled, output = console.error) {
+  return (message) => {
+    if (enabled) {
+      output(`[verbose] ${new Date().toISOString()} ${message}`);
+    }
+  };
+}
+
 function createOctokit(token, fetchImpl = globalThis.fetch) {
   return new Octokit({
     auth: token,
@@ -220,14 +233,6 @@ function entityBasePath(scope, target) {
   return scope === 'enterprise'
     ? `/enterprises/${encodeURIComponent(target)}/copilot/metrics/reports`
     : `/orgs/${encodeURIComponent(target)}/copilot/metrics/reports`;
-}
-
-function serializeResponse(response) {
-  return {
-    status: response.status,
-    headers: response.headers,
-    data: response.data,
-  };
 }
 
 function safeTargetName(value) {
@@ -287,21 +292,45 @@ async function downloadFile(url, filePath, fetchImpl = globalThis.fetch) {
   }
 }
 
-async function readCompletedResult(resultPath) {
+const resultLocks = new Map();
+
+function queueResultUpdate(resultPath, updater) {
+  const previous = resultLocks.get(resultPath) || Promise.resolve();
+  const next = previous.then(updater, updater);
+  resultLocks.set(resultPath, next.then(() => {}, () => {}));
+  return next;
+}
+
+async function readResultEntries(resultPath) {
   if (!(await pathExists(resultPath))) {
+    return {};
+  }
+  const state = JSON.parse(await fsp.readFile(resultPath, 'utf8'));
+  return state.entries || {};
+}
+
+async function writeResultEntry(resultPath, key, entry) {
+  return queueResultUpdate(resultPath, async () => {
+    const entries = await readResultEntries(resultPath);
+    entries[key] = entry;
+    await atomicWriteJson(resultPath, { entries });
+    return entry;
+  });
+}
+
+async function readCompletedEntry(resultPath, key) {
+  const entries = await readResultEntries(resultPath);
+  const entry = entries[key];
+  if (!entry || entry.state !== 'completed') {
     return null;
   }
-  const result = JSON.parse(await fsp.readFile(resultPath, 'utf8'));
-  if (result.state !== 'completed') {
-    return null;
-  }
-  const files = result.local_files || [];
+  const files = entry.local_files || [];
   for (const filePath of files) {
     if (!(await pathExists(filePath))) {
       return null;
     }
   }
-  return result;
+  return entry;
 }
 
 async function fetchReport({
@@ -315,15 +344,19 @@ async function fetchReport({
   day,
   force,
   latest,
+  log = () => {},
 }) {
   const basePath = entityBasePath(scope, target);
   const knownDirectory = latest
     ? null
     : path.join(root, 'raw', 'daily', day, family);
+  const resultPath = path.join(root, 'result.json');
+  const dailyKey = latest ? null : `daily/${family}/${day}`;
 
   if (!latest && !force) {
-    const completed = await readCompletedResult(path.join(knownDirectory, 'result.json'));
+    const completed = await readCompletedEntry(resultPath, dailyKey);
     if (completed) {
+      log(`skip ${family} ${day}: already completed at ${knownDirectory}`);
       return { ...completed, skipped: true };
     }
   }
@@ -334,7 +367,9 @@ async function fetchReport({
   if (day) {
     requestOptions.day = day;
   }
+  log(`request GET ${basePath}/${endpoint}${day ? ` day=${day}` : ''}`);
   const response = await octokit.request(`GET ${basePath}/${endpoint}`, requestOptions);
+  log(`response ${family}${day ? ` ${day}` : ''}: status ${response.status}`);
   const responseData = response.data || {};
   const reportKey = responseData.report_day
     || [responseData.report_start_day, responseData.report_end_day].filter(Boolean).join('_')
@@ -342,22 +377,24 @@ async function fetchReport({
   const directory = latest
     ? path.join(root, 'raw', 'latest', family, reportKey)
     : knownDirectory;
-  const resultPath = path.join(directory, 'result.json');
+  const resultKey = latest ? `latest/${family}` : dailyKey;
 
   if (latest && !force) {
-    const completed = await readCompletedResult(resultPath);
-    if (completed) {
+    const completed = await readCompletedEntry(resultPath, resultKey);
+    if (completed && completed.report_key === reportKey) {
+      log(`skip ${family} ${reportKey}: already completed at ${directory}`);
       return { ...completed, skipped: true };
     }
   }
 
-  await atomicWriteJson(path.join(directory, 'api-response.json'), serializeResponse(response));
   const downloadLinks = Array.isArray(responseData.download_links)
     ? responseData.download_links
     : [];
+  log(`${family}${day ? ` ${day}` : ''}: ${downloadLinks.length} download link(s)`);
   const localFiles = [];
   for (let index = 0; index < downloadLinks.length; index += 1) {
     const filePath = path.resolve(directory, `report-${String(index + 1).padStart(3, '0')}.ndjson`);
+    log(`downloading ${downloadLinks[index]} -> ${filePath}`);
     await downloadFile(downloadLinks[index], filePath, fetchImpl);
     localFiles.push(filePath);
   }
@@ -369,10 +406,11 @@ async function fetchReport({
     day: responseData.report_day || day || null,
     report_start_day: responseData.report_start_day || null,
     report_end_day: responseData.report_end_day || null,
+    report_key: latest ? reportKey : undefined,
     empty: response.status === 204 || downloadLinks.length === 0,
     local_files: localFiles,
   };
-  await atomicWriteJson(resultPath, result);
+  await writeResultEntry(resultPath, resultKey, result);
   return result;
 }
 
@@ -389,7 +427,7 @@ function nextCursor(linkHeader) {
   return null;
 }
 
-async function fetchUsageRecords({ octokit, root, target, phrase, runId }) {
+async function fetchUsageRecords({ octokit, root, target, phrase, runId, log = () => {} }) {
   const directory = path.join(root, 'raw', 'usage-records', runId);
   const recordsPath = path.resolve(directory, 'records.ndjson');
   const temporary = tempPath(recordsPath);
@@ -401,6 +439,7 @@ async function fetchUsageRecords({ octokit, root, target, phrase, runId }) {
 
   try {
     do {
+      log(`request usage-records page ${pageCount + 1}${after ? ` after=${after}` : ''}`);
       const response = await octokit.request(
         `GET /enterprises/${encodeURIComponent(target)}/copilot/usage-records`,
         {
@@ -413,6 +452,7 @@ async function fetchUsageRecords({ octokit, root, target, phrase, runId }) {
       );
       pageCount += 1;
       const records = Array.isArray(response.data) ? response.data : [];
+      log(`usage-records page ${pageCount}: ${records.length} row(s)`);
       for (const record of records) {
         if (!output.write(`${JSON.stringify(record)}\n`)) {
           await once(output, 'drain');
@@ -441,7 +481,7 @@ async function fetchUsageRecords({ octokit, root, target, phrase, runId }) {
     empty: rowCount === 0,
     local_files: [recordsPath],
   };
-  await atomicWriteJson(path.join(directory, 'result.json'), result);
+  await writeResultEntry(path.join(root, 'result.json'), `usage-records/${runId}`, result);
   return result;
 }
 
@@ -471,70 +511,6 @@ async function mapLimit(items, limit, mapper) {
   return results;
 }
 
-async function* reportRows(filePath) {
-  const handle = await fsp.open(filePath, 'r');
-  const prefix = Buffer.alloc(64);
-  const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0);
-  await handle.close();
-  const firstCharacter = prefix.subarray(0, bytesRead).toString('utf8').trimStart()[0];
-
-  if (firstCharacter === '[') {
-    const value = JSON.parse(await fsp.readFile(filePath, 'utf8'));
-    if (!Array.isArray(value)) {
-      throw new Error(`Expected a JSON array in ${filePath}`);
-    }
-    for (const row of value) {
-      yield row;
-    }
-    return;
-  }
-
-  const input = fs.createReadStream(filePath);
-  const lines = readline.createInterface({ input, crlfDelay: Infinity });
-  let lineNumber = 0;
-  for await (const line of lines) {
-    lineNumber += 1;
-    if (!line.trim()) {
-      continue;
-    }
-    try {
-      yield JSON.parse(line);
-    } catch (error) {
-      throw new Error(`Invalid NDJSON in ${filePath} at line ${lineNumber}: ${error.message}`);
-    }
-  }
-}
-
-async function writeJson(filePath, inputFiles) {
-  let rowCount = 0;
-  const temporary = tempPath(filePath);
-  await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  const output = fs.createWriteStream(temporary, { flags: 'wx' });
-  try {
-    output.write('[\n');
-    let firstRow = true;
-    for (const inputFile of inputFiles) {
-      for await (const row of reportRows(inputFile)) {
-        const prefix = firstRow ? '' : ',\n';
-        firstRow = false;
-        rowCount += 1;
-        if (!output.write(`${prefix}${JSON.stringify(row)}`)) {
-          await once(output, 'drain');
-        }
-      }
-    }
-    output.write('\n]\n');
-    output.end();
-    await once(output, 'finish');
-    await fsp.rename(temporary, filePath);
-    return { file: path.resolve(filePath), rows: rowCount };
-  } catch (error) {
-    output.destroy();
-    await fsp.rm(temporary, { force: true });
-    throw error;
-  }
-}
-
 function createRunId(now = new Date()) {
   return now.toISOString().replace(/[:.]/g, '-');
 }
@@ -548,7 +524,9 @@ async function runExporter(options, dependencies = {}) {
   const octokit = dependencies.octokit || createOctokit(token, fetchImpl);
   const now = dependencies.now || new Date();
   const runId = createRunId(now);
+  const log = dependencies.log || createLogger(options.verbose);
   const root = path.join(options.output, options.scope, safeTargetName(options.target));
+  log(`run ${runId}: root ${root}`);
   const manifest = {
     run_id: runId,
     state: 'running',
@@ -565,11 +543,12 @@ async function runExporter(options, dependencies = {}) {
       usage_phrase: options.usagePhrase || null,
       force: options.force,
       concurrency: options.concurrency,
+      verbose: options.verbose,
     },
     completed: [],
     empty: [],
+    unavailable: [],
     failures: [],
-    json: [],
   };
   await fsp.mkdir(root, { recursive: true });
 
@@ -579,10 +558,12 @@ async function runExporter(options, dependencies = {}) {
       tasks.push({ family, endpoint, day, latest: false });
     }
   }
+  log(`daily reports: ${tasks.length} task(s) at concurrency ${options.concurrency}`);
 
   let stopForAuthorization = false;
-  const reportResults = await mapLimit(tasks, options.concurrency, async (task) => {
+  await mapLimit(tasks, options.concurrency, async (task) => {
     if (stopForAuthorization) {
+      log(`skip ${task.family} ${task.day}: stopped after an authorization failure`);
       return null;
     }
     try {
@@ -593,6 +574,7 @@ async function runExporter(options, dependencies = {}) {
         target: options.target,
         root,
         force: options.force,
+        log,
         ...task,
       });
       manifest.completed.push({
@@ -606,6 +588,7 @@ async function runExporter(options, dependencies = {}) {
       }
       return result;
     } catch (error) {
+      log(`failed ${task.family} ${task.day}: ${error.message}`);
       manifest.failures.push(errorDetails(error, {
         type: 'daily-report',
         family: task.family,
@@ -619,6 +602,7 @@ async function runExporter(options, dependencies = {}) {
   });
 
   if (!options.skipLatest && !stopForAuthorization) {
+    log(`latest reports: ${LATEST_FAMILIES[options.scope].length} task(s)`);
     for (const [family, endpoint] of LATEST_FAMILIES[options.scope]) {
       try {
         const result = await fetchReport({
@@ -631,8 +615,8 @@ async function runExporter(options, dependencies = {}) {
           root,
           force: options.force,
           latest: true,
+          log,
         });
-        reportResults.push(result);
         manifest.completed.push({
           family,
           report_start_day: result.report_start_day,
@@ -644,6 +628,7 @@ async function runExporter(options, dependencies = {}) {
           manifest.empty.push({ family, report_end_day: result.report_end_day });
         }
       } catch (error) {
+        log(`failed ${family} (latest): ${error.message}`);
         manifest.failures.push(errorDetails(error, { type: 'latest-report', family }));
         if (error.status === 401 || error.status === 403) {
           stopForAuthorization = true;
@@ -651,6 +636,8 @@ async function runExporter(options, dependencies = {}) {
         }
       }
     }
+  } else if (options.skipLatest) {
+    log('latest reports: skipped by --skip-latest');
   }
 
   let usageResult = null;
@@ -659,6 +646,7 @@ async function runExporter(options, dependencies = {}) {
     && !options.skipUsageRecords
     && !stopForAuthorization
   ) {
+    log('usage records: starting fetch');
     try {
       usageResult = await fetchUsageRecords({
         octokit,
@@ -666,6 +654,7 @@ async function runExporter(options, dependencies = {}) {
         target: options.target,
         phrase: options.usagePhrase,
         runId,
+        log,
       });
       manifest.completed.push({
         family: 'usage-records',
@@ -676,47 +665,30 @@ async function runExporter(options, dependencies = {}) {
         manifest.empty.push({ family: 'usage-records' });
       }
     } catch (error) {
-      manifest.failures.push(errorDetails(error, {
-        type: 'usage-records',
-        family: 'usage-records',
-        note: 'This public-preview endpoint requires an EMU enterprise owner.',
-      }));
+      if (error.status === 404) {
+        log('usage records: unavailable (404) - the enterprise is likely not an EMU enterprise');
+        manifest.unavailable.push(errorDetails(error, {
+          type: 'usage-records',
+          family: 'usage-records',
+          note: 'This endpoint is only available to EMU (GHEC and GHEC with Data Residency) enterprise owners.',
+        }));
+      } else {
+        log(`failed usage-records: ${error.message}`);
+        manifest.failures.push(errorDetails(error, {
+          type: 'usage-records',
+          family: 'usage-records',
+          note: 'This public-preview endpoint requires an EMU enterprise owner.',
+        }));
+      }
     }
-  }
-
-  const filesByFamily = new Map();
-  for (const result of reportResults.filter(Boolean)) {
-    if (!filesByFamily.has(result.family)) {
-      filesByFamily.set(result.family, []);
-    }
-    filesByFamily.get(result.family).push(...result.local_files);
-  }
-  if (usageResult) {
-    filesByFamily.set('usage-records', usageResult.local_files);
-  }
-
-  for (const [family, inputFiles] of filesByFamily) {
-    if (inputFiles.length === 0) {
-      continue;
-    }
-    const range = family.endsWith('28-day') || family === 'usage-records'
-      ? runId
-      : `${options.from}_${options.to}`;
-    const jsonPath = path.join(root, 'json', `${family}_${range}.json`);
-    try {
-      manifest.json.push(await writeJson(jsonPath, inputFiles));
-    } catch (error) {
-      manifest.failures.push(errorDetails(error, {
-        type: 'json',
-        family,
-        input_files: inputFiles,
-      }));
-    }
+  } else if (options.skipUsageRecords) {
+    log('usage records: skipped by --skip-usage-records');
   }
 
   manifest.state = manifest.failures.length === 0 ? 'completed' : 'incomplete';
   manifest.finished_at = (dependencies.finishedAt || new Date()).toISOString();
   const manifestPath = path.join(root, 'manifests', `${runId}.json`);
+  log(`writing manifest to ${manifestPath}`);
   await atomicWriteJson(manifestPath, manifest);
   await atomicWriteJson(path.join(root, 'manifest-latest.json'), manifest);
   return { manifest, manifestPath };
@@ -741,12 +713,19 @@ async function main() {
   console.log(`Fetching Copilot metrics for ${options.scope} ${options.target}`);
   console.log(`Daily range: ${options.from} through ${options.to}`);
   console.log(`Output: ${options.output}`);
+  if (options.verbose) {
+    console.log('Verbose logging enabled');
+  }
 
   try {
     const { manifest, manifestPath } = await runExporter(options);
     console.log(`Manifest: ${manifestPath}`);
     console.log(`Completed artifacts: ${manifest.completed.length}`);
-    console.log(`JSON files: ${manifest.json.length}`);
+    if (manifest.unavailable.length > 0) {
+      for (const entry of manifest.unavailable) {
+        console.log(`Note: ${entry.type} ${entry.family || ''} is unavailable: ${entry.note}`);
+      }
+    }
     if (manifest.failures.length > 0) {
       console.error(`The run is incomplete. Failures: ${manifest.failures.length}`);
       for (const failure of manifest.failures) {
@@ -776,8 +755,7 @@ module.exports = {
   enumerateDays,
   entityBasePath,
   nextCursor,
-  reportRows,
-  writeJson,
+  createLogger,
   fetchReport,
   fetchUsageRecords,
   runExporter,

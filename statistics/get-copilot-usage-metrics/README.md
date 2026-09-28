@@ -1,159 +1,84 @@
 # GitHub Copilot usage metrics exporter
 
-This script fetches the data from the [GitHub Copilot usage metrics REST API](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage-metrics?apiVersion=2026-03-10). It supports enterprise and organization reports, raw NDJSON downloads, JSON summary files, and enterprise usage records.
-
-## Data fetched
-
-An enterprise run fetches:
-
-- Daily enterprise, repository, user-team, and user reports
-- Latest 28-day enterprise and user reports
-- All pages from the public-preview enterprise usage-records endpoint
-
-An organization run fetches:
-
-- Daily organization, repository, user-team, and user reports
-- Latest 28-day organization and user reports
-
-By default, daily reports cover the most recent 28-day window ending yesterday in UTC. Use `--day` or `--from` with `--to` to fetch a different period.
-
-## Requirements
-
-- Node.js 18 or later
-- A GitHub Enterprise Cloud account
-- The enterprise **Copilot usage metrics** policy set to **Enabled everywhere**
-- A token in `GITHUB_TOKEN`
-
-Token access depends on the target:
-
-| Target | Required access |
-|---|---|
-| Enterprise reports | Enterprise owner, billing manager, or fine-grained **View Enterprise Copilot Metrics** permission. Classic tokens need `manage_billing:copilot` or `read:enterprise`. |
-| Enterprise usage records | EMU enterprise owner. Classic tokens need `read:enterprise`. |
-| Organization reports | Organization owner or fine-grained **View Organization Copilot Metrics** permission. Classic tokens need `read:org`. |
-
-The usage-records endpoint is in public preview. A non-EMU enterprise or a token without access makes the run incomplete. Use `--skip-usage-records` when this data is intentionally out of scope.
+Fetches raw GitHub Copilot usage metrics from the [REST API](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage-metrics). Exports daily and 28-day reports, plus enterprise usage records, without transformation.
 
 ## Setup
 
-Install the repository dependencies:
-
 ```bash
 npm install
-```
-
-Set the token in the environment:
-
-```bash
 export GITHUB_TOKEN=your_token
 ```
 
-You can also copy `.env.example` to the repository root as `.env`.
-
 ## Usage
 
-Fetch the default enterprise data window (past 28 days):
-
+Enterprise (includes usage records):
 ```bash
-node statistics/get-copilot-usage-metrics/get-copilot-usage-metrics.js \
-  --enterprise ENTERPRISE_SLUG
+node statistics/get-copilot-usage-metrics/get-copilot-usage-metrics.js --enterprise SLUG
 ```
 
-Fetch the default organization data window (past 28 days):
-
+Organization:
 ```bash
-node statistics/get-copilot-usage-metrics/get-copilot-usage-metrics.js \
-  --org ORGANIZATION
+node statistics/get-copilot-usage-metrics/get-copilot-usage-metrics.js --org NAME
 ```
 
-Fetch one day:
-
+Date options (default: past 28 days ending yesterday):
 ```bash
-node statistics/get-copilot-usage-metrics/get-copilot-usage-metrics.js \
-  --org ORGANIZATION \
-  --day 2026-09-01
+--day 2026-09-01          # One day
+--from 2026-08-01 --to 2026-08-31  # Date range
 ```
 
-Fetch an inclusive date range and omit the latest 28-day reports:
-
+Other options:
 ```bash
-node statistics/get-copilot-usage-metrics/get-copilot-usage-metrics.js \
-  --enterprise ENTERPRISE_SLUG \
-  --from 2026-08-01 \
-  --to 2026-08-31 \
-  --skip-latest
+--output <dir>            # Output directory (default: copilot-usage-metrics-exports)
+--usage-phrase <phrase>   # Filter usage records (enterprise only)
+--skip-latest             # Skip 28-day reports
+--skip-usage-records      # Skip usage records (enterprise only)
+--force                   # Re-fetch completed reports
+--concurrency <1-10>      # Parallel requests (default: 4)
+--verbose                 # Print detailed progress to stderr
 ```
 
-Filter enterprise usage records with the API search syntax:
+## Output structure
 
-```bash
-node statistics/get-copilot-usage-metrics/get-copilot-usage-metrics.js \
-  --enterprise ENTERPRISE_SLUG \
-  --usage-phrase "type:request created:>=2026-09-01"
 ```
-
-Run `--help` for all options:
-
-```text
---enterprise <slug>       Enterprise target
---org <name>              Organization target
---day <YYYY-MM-DD>        One daily report date
---from <YYYY-MM-DD>       First day in an inclusive range
---to <YYYY-MM-DD>         Last day in an inclusive range
---output <directory>      Output directory
---usage-phrase <phrase>   Enterprise usage-record filter
---skip-latest             Omit latest 28-day reports
---skip-usage-records      Omit enterprise usage records
---force                   Replace completed daily artifacts
---concurrency <1-10>      Concurrent report requests
---help                    Show help
-```
-
-## Output
-
-The default output directory is `copilot-usage-metrics-exports/`. Data is grouped by scope and target:
-
-```text
 copilot-usage-metrics-exports/
-  enterprise/ENTERPRISE_SLUG/
+  enterprise|organization/TARGET/
     raw/
       daily/YYYY-MM-DD/REPORT_FAMILY/
       latest/REPORT_FAMILY/REPORT_RANGE/
       usage-records/RUN_ID/
-    json/
     manifests/
     manifest-latest.json
+    result.json
 ```
 
-Each raw report directory contains:
+Each report directory contains only:
+- `report-NNN.ndjson` — Downloaded data shards
 
-- `api-response.json`: The REST response that supplied the signed download URLs
-- `report-NNN.ndjson`: The downloaded report shards
-- `result.json`: Local completion metadata
+`result.json` at the target root tracks completion for every daily report, latest report, and usage-records run, keyed by family/day. It is read and updated on each fetch rather than written per report directory.
 
-JSON files contain an array combining the selected reports by family. Rows retain their original nested objects and arrays, so language, feature, IDE, model, agent, and other variable breakdowns remain structured. Daily summaries use the selected date range in their file names; latest 28-day reports and usage records use a run ID.
+## Behavior
 
-The manifest records the arguments, completed and empty reports, failures, row counts, JSON file paths, and final state in its `json` array. A command exits with status 1 when the manifest is incomplete.
+- **Resume**: Skips completed daily reports (marked in `result.json`). Use `--force` to re-fetch.
+- **Latest reports**: Fetched on every run to detect new ranges.
+- **Atomic writes**: Uses temporary files; interrupted downloads are not marked complete.
+- **Empty reports**: GitHub returns `204 No Content` for missing data; recorded as empty, not failed.
+- **Usage records availability**: The usage-records endpoint returns `404 Not Found` for non-EMU enterprises. This is recorded as unavailable, not failed, and does not affect the exit code.
+- **Manifest**: Tracks completed artifacts, empty reports, unavailable endpoints, and failures. Exit code 1 if incomplete (failures only).
+- **Verbose logging**: With `--verbose`, prints timestamped progress (requests, downloads, skips, pagination) to stderr; stdout summary output is unchanged.
 
-## Resume and refresh behavior
+## Requirements
 
-A repeated run skips a daily report when its `result.json` and all downloaded files are complete. `--force` requests and replaces those files. Latest reports are requested on every run so the script can identify a new report range. Usage records are stored under a new run ID because the event stream can grow.
+- Node.js 18+
+- GitHub Enterprise Cloud account
+- `GITHUB_TOKEN` environment variable
 
-Downloads use temporary files and an atomic rename. An interrupted file is not marked as complete.
+Token permissions:
+- Enterprise reports: Owner, billing manager, or fine-grained `View Enterprise Copilot Metrics`
+- Organization reports: Owner or fine-grained `View Organization Copilot Metrics`
+- Usage records: EMU (GHEC and GHEC with Data Residency) enterprise owner only (public preview; optional with `--skip-usage-records`). Requests a 404 for non-EMU enterprises and is recorded as unavailable rather than a failure.
 
-## Data notes
-
-- Signed report URLs expire, so the script downloads each report immediately.
-- GitHub can return `204 No Content` for report families without data. The manifest records these reports as empty, not failed.
-- User reports contain identifiable usage data. Protect the output directory and apply your organization's retention requirements.
-- Teams with fewer than five seated Copilot users are omitted from user-team reports by GitHub.
-- Daily user and user-team files can be joined on `user_id`, `day`, and `enterprise_id` or `organization_id`. The exporter preserves these source files but does not derive team totals.
-- A user who belongs to multiple teams contributes to each team. Do not sum derived team totals to calculate an enterprise or organization total.
-- The script uses REST API version `2026-03-10`.
-
-## Tests
-
-Run the focused tests:
+## Testing
 
 ```bash
 npm test

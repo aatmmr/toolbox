@@ -10,7 +10,7 @@ const {
   getDefaultDateRange,
   enumerateDays,
   nextCursor,
-  writeJson,
+  createLogger,
   fetchReport,
   fetchUsageRecords,
   runExporter,
@@ -42,6 +42,23 @@ test('parseArgs selects one target and applies a daily range', () => {
   assert.equal(options.to, '2026-01-31');
   assert.equal(options.concurrency, 3);
   assert.equal(options.output, path.resolve('./result'));
+});
+
+test('parseArgs enables verbose logging via --verbose', () => {
+  assert.equal(parseArgs(['--org', 'octo-org']).verbose, false);
+  assert.equal(parseArgs(['--org', 'octo-org', '--verbose']).verbose, true);
+});
+
+test('createLogger only writes when enabled', () => {
+  const lines = [];
+  const disabled = createLogger(false, (line) => lines.push(line));
+  const enabled = createLogger(true, (line) => lines.push(line));
+
+  disabled('should not appear');
+  enabled('should appear');
+
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\[verbose\] .+ should appear$/);
 });
 
 test('parseArgs rejects conflicting targets and date options', () => {
@@ -78,27 +95,12 @@ test('default range uses the past 28 days ending yesterday', () => {
   );
 });
 
-test('cursor and JSON helpers preserve structured data', async (t) => {
+test('nextCursor extracts the after parameter from a Link header', () => {
   assert.equal(
     nextCursor('<https://api.github.com/example?after=abc%2B123>; rel="next", <https://api.github.com/example?before=z>; rel="prev"'),
     'abc+123',
   );
-  const directory = await temporaryDirectory(t);
-  const source = path.join(directory, 'source.ndjson');
-  const destination = path.join(directory, 'result.json');
-  await fs.writeFile(
-    source,
-    '{"user":{"id":1},"breakdown":[{"language":"js"}],"note":"a,b"}\n'
-      + '{"user":{"id":2},"extra":true}\n',
-  );
-  const result = await writeJson(destination, [source]);
-  const json = JSON.parse(await fs.readFile(destination, 'utf8'));
-
-  assert.equal(result.rows, 2);
-  assert.deepEqual(json, [
-    { user: { id: 1 }, breakdown: [{ language: 'js' }], note: 'a,b' },
-    { user: { id: 2 }, extra: true },
-  ]);
+  assert.equal(nextCursor(null), null);
 });
 
 test('fetchReport downloads all files and resumes completed daily reports', async (t) => {
@@ -264,8 +266,7 @@ test('runExporter covers all enterprise endpoint families and writes a complete 
 
   assert.equal(manifest.state, 'completed');
   assert.equal(manifest.failures.length, 0);
-  assert.equal(manifest.json.length, 7);
-  assert.ok(manifest.json.every((entry) => entry.file.endsWith('.json')));
+  assert.equal(manifest.completed.length, 7);
   assert.equal(routes.length, 7);
   for (const endpoint of [
     'enterprise-1-day',
@@ -278,7 +279,98 @@ test('runExporter covers all enterprise endpoint families and writes a complete 
   ]) {
     assert.ok(routes.some((route) => route.endsWith(`/${endpoint}`)), endpoint);
   }
-  assert.equal(JSON.parse(await fs.readFile(manifestPath, 'utf8')).state, 'completed');
+  const savedManifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  assert.equal(savedManifest.state, 'completed');
+});
+
+test('runExporter records a 404 on usage-records as unavailable, not a failure', async (t) => {
+  const output = await temporaryDirectory(t);
+  const octokit = {
+    request: async (route, options) => {
+      if (route.endsWith('/usage-records')) {
+        const error = new Error('Not Found');
+        error.status = 404;
+        throw error;
+      }
+      const latest = route.endsWith('/latest');
+      const family = route.split('/').at(-1) === 'latest'
+        ? route.split('/').at(-2)
+        : route.split('/').at(-1);
+      return {
+        status: 200,
+        headers: {},
+        data: {
+          ...(latest
+            ? { report_start_day: '2026-01-01', report_end_day: '2026-01-28' }
+            : { report_day: options.day }),
+          download_links: [`https://download.test/${family}`],
+        },
+      };
+    },
+  };
+  const fetchImpl = async (url) => new Response(
+    `${JSON.stringify({ source: new URL(url).pathname.slice(1), nested: { count: 1 } })}\n`,
+    { status: 200 },
+  );
+  const options = parseArgs([
+    '--enterprise',
+    'octo-enterprise',
+    '--day',
+    '2026-01-28',
+    '--output',
+    output,
+  ]);
+
+  const { manifest } = await runExporter(options, {
+    octokit,
+    fetchImpl,
+    now: new Date('2026-01-29T01:02:03Z'),
+    finishedAt: new Date('2026-01-29T01:03:00Z'),
+  });
+
+  assert.equal(manifest.state, 'completed');
+  assert.equal(manifest.failures.length, 0);
+  assert.equal(manifest.unavailable.length, 1);
+  assert.equal(manifest.unavailable[0].family, 'usage-records');
+  assert.equal(manifest.unavailable[0].status, 404);
+});
+
+test('runExporter logs progress when verbose is enabled', async (t) => {
+  const output = await temporaryDirectory(t);
+  const octokit = {
+    request: async (route, requestOptions) => ({
+      status: 200,
+      headers: {},
+      data: {
+        report_day: requestOptions.day,
+        download_links: [`https://download.test/${route}`],
+      },
+    }),
+  };
+  const options = parseArgs([
+    '--org',
+    'octo-org',
+    '--day',
+    '2026-01-28',
+    '--output',
+    output,
+    '--skip-latest',
+    '--skip-usage-records',
+    '--verbose',
+  ]);
+  const logLines = [];
+
+  await runExporter(options, {
+    octokit,
+    fetchImpl: async () => new Response('{"count":1}\n', { status: 200 }),
+    now: new Date('2026-01-29T01:02:03Z'),
+    finishedAt: new Date('2026-01-29T01:03:00Z'),
+    log: (message) => logLines.push(message),
+  });
+
+  assert.ok(logLines.some((line) => line.includes('daily reports: 4 task(s)')));
+  assert.ok(logLines.some((line) => line.includes('latest reports: skipped')));
+  assert.ok(logLines.some((line) => line.includes('usage records: skipped')));
 });
 
 test('runExporter marks API failures in the manifest', async (t) => {
